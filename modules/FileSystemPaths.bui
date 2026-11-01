@@ -1,0 +1,168 @@
+' Internal backend; the facade translates only native failures to FileInspectionException.
+Public Class FSPNativePathException Inherits Exception
+    Public Sub Constructor(operation As String, entryPath As String, code As Integer)
+        Super.Constructor(operation, code)
+    End Sub
+End Class
+
+#If TargetWindows Then
+Private Declare Function FSPCalloc Lib "msvcrt" Alias "calloc" (count As Integer, size As Integer) As Ptr
+Private Declare Sub FSPFree Lib "msvcrt" Alias "free" (memory As Ptr)
+Private Declare Function FSPWide Lib "kernel32" Alias "MultiByteToWideChar" (codepage As UInt32, nativeOptions As UInt32, input As String, length As Int32, output As Ptr, capacity As Int32) As Int32
+Private Declare Function FSPUTF8 Lib "kernel32" Alias "WideCharToMultiByte" (codepage As UInt32, nativeOptions As UInt32, input As Ptr, length As Int32, output As Ptr, capacity As Int32, defaultCharacter As Ptr, usedDefault As Ptr) As Int32
+Private Declare Function FSPLastError Lib "kernel32" Alias "GetLastError" () As UInt32
+Private Declare Function FSPFullPath Lib "kernel32" Alias "GetFullPathNameW" (input As Ptr, capacity As UInt32, output As Ptr, filePart As Ptr) As UInt32
+Private Declare Function FSPOpen Lib "kernel32" Alias "CreateFileW" (entryPath As Ptr, access As UInt32, sharing As UInt32, security As Ptr, disposition As UInt32, nativeOptions As UInt32, templateFile As Ptr) As Ptr
+Private Optional Declare Function FSPFinalPath Lib "kernel32" Alias "GetFinalPathNameByHandleW" (handle As Ptr, output As Ptr, capacity As UInt32, nativeOptions As UInt32) As UInt32
+Private Declare Function FSPClose Lib "kernel32" Alias "CloseHandle" (handle As Ptr) As Int32
+#Else
+Private Declare Function FSPCalloc Lib "c" Alias "calloc" (count As Integer, size As Integer) As Ptr
+Private Declare Sub FSPFree Lib "c" Alias "free" (memory As Ptr)
+Private Declare Function FSPReadError Lib "c" Alias "memcpy" (ByRef value As Int32, source As Ptr, count As Integer) As Ptr
+Private Declare Function FSPGetCwd Lib "c" Alias "getcwd" (buffer As Ptr, capacity As Integer) As Ptr
+#If TargetMac Then
+Private Declare Function FSPErrnoPointer Lib "c" Alias "__error" () As Ptr
+Private Declare Function FSPFindSymbol Lib "c" Alias "dlsym" (handle As Ptr, name As String) As Ptr
+Private Delegate Function FSPRealPathCall(input As String, output As Ptr) As Ptr
+Private Function FSPRealPath(input As String, output As Ptr) As Ptr
+    Dim symbol As Ptr = FSPFindSymbol(CType(-2, Ptr), "realpath$DARWIN_EXTSN")
+    If symbol = Nil Then Throw New LibraryUnavailableException("System realpath$DARWIN_EXTSN is unavailable")
+    Dim invokeNative As FSPRealPathCall = CType(symbol, FSPRealPathCall)
+    Return invokeNative(input, output)
+End Function
+#Else
+Private Declare Function FSPErrnoPointer Lib "c" Alias "__errno_location" () As Ptr
+Private Optional Declare Function FSPRealPath Lib "c" Alias "realpath" (input As String, output As Ptr) As Ptr
+#End If
+Private Function FSPErrno() As Integer
+    Dim code As Int32
+    FSPReadError(code, FSPErrnoPointer(), 4)
+    Return code
+End Function
+#End If
+
+Private Sub FSPValidate(input As String)
+    If input = "" Then Throw New InvalidArgumentException("path is required")
+    For Each character As String In String.Chars(input)
+        If String.Asc(character) = 0 Then Throw New InvalidArgumentException("path contains NUL")
+    Next
+End Sub
+
+Private Function FSPAllocate(size As Integer) As Ptr
+    Dim memory As Ptr = FSPCalloc(1, size)
+    If memory = Nil Then Throw New RuntimeException("Unable to allocate path buffer")
+    Return memory
+End Function
+
+#If TargetWindows Then
+Private Function FSPMakeWide(input As String) As Ptr
+    Dim count As Integer = FSPWide(65001, 8, input, -1, Nil, 0)
+    If count = 0 Then Throw New FSPNativePathException("UTF-16 conversion", input, FSPLastError())
+    Dim memory As Ptr = FSPAllocate(count * 2)
+    If FSPWide(65001, 8, input, -1, memory, count) = 0 Then
+        Dim code As Integer = FSPLastError()
+        FSPFree(memory)
+        Throw New FSPNativePathException("UTF-16 conversion", input, code)
+    End If
+    Return memory
+End Function
+
+Private Function FSPCopyWide(input As Ptr, units As Integer) As String
+    Dim length As Integer = FSPUTF8(65001, 128, input, units, Nil, 0, Nil, Nil)
+    If length = 0 Then Throw New FSPNativePathException("UTF-8 conversion", "native path", FSPLastError())
+    Dim memory As Ptr = FSPAllocate(length + 1)
+    Try
+        If FSPUTF8(65001, 128, input, units, memory, length, Nil, Nil) = 0 Then Throw New FSPNativePathException("UTF-8 conversion", "native path", FSPLastError())
+        Return CType(CType(memory, CString), String)
+    Finally
+        FSPFree(memory)
+    End Try
+End Function
+
+Private Function FSPWindowsPath(input As String, canonical As Boolean) As String
+    Dim wide As Ptr = FSPMakeWide(input)
+    Dim handle As Ptr = CType(-1, Ptr)
+    Dim buffer As Ptr = Nil
+    Try
+        If canonical Then
+            ' Zero desired access, all sharing, OPEN_EXISTING, BACKUP_SEMANTICS.
+            ' Deliberately omit OPEN_REPARSE_POINT: resolve the final link too.
+            handle = FSPOpen(wide, 0, 7, Nil, 3, 33554432, Nil)
+            If handle = CType(-1, Ptr) Then Throw New FSPNativePathException("open canonical path", input, FSPLastError())
+        End If
+        Dim capacity As Integer = 256
+        Do
+            buffer = FSPAllocate(capacity * 2)
+            Dim count As Integer
+            If canonical Then
+                count = FSPFinalPath(handle, buffer, capacity, 0)
+            Else
+                count = FSPFullPath(wide, capacity, buffer, Nil)
+            End If
+            If count = 0 Then Throw New FSPNativePathException("resolve path", input, FSPLastError())
+            If count < capacity Then Return FSPCopyWide(buffer, count)
+            FSPFree(buffer)
+            buffer = Nil
+            capacity = count + 1
+        Loop
+    Finally
+        If buffer <> Nil Then FSPFree(buffer)
+        If handle <> CType(-1, Ptr) Then FSPClose(handle)
+        FSPFree(wide)
+    End Try
+End Function
+#Else
+Private Function FSPCurrentDirectory() As String
+    Dim capacity As Integer = 256
+    Do
+        Dim buffer As Ptr = FSPAllocate(capacity)
+        Dim code As Integer = 0
+        Try
+            If FSPGetCwd(buffer, capacity) <> Nil Then Return CType(CType(buffer, CString), String)
+            code = FSPErrno()
+        Finally
+            FSPFree(buffer)
+        End Try
+        ' ERANGE on all supported POSIX ABIs. Other errors keep their errno.
+        If code <> 34 Then Throw New FSPNativePathException("getcwd", ".", code)
+        capacity *= 2
+    Loop
+End Function
+#End If
+
+''' Resolve an existing path through links; native failures preserve errno/GetLastError.
+Public Function FSPCanonicalPath(entryPath As String) As String
+    FSPValidate(entryPath)
+    #If TargetWindows Then
+        Return FSPWindowsPath(entryPath, True)
+    #Else
+        Dim resolved As Ptr = FSPRealPath(entryPath, Nil)
+        If resolved = Nil Then Throw New FSPNativePathException("realpath", entryPath, FSPErrno())
+        Try
+            Return CType(CType(resolved, CString), String)
+        Finally
+            FSPFree(resolved)
+        End Try
+    #End If
+End Function
+
+''' Lexical absolute entryPath only: no existence check and no link resolution.
+Public Function FSPAbsolutePath(entryPath As String) As String
+    FSPValidate(entryPath)
+    #If TargetWindows Then
+        Return FSPWindowsPath(entryPath, False)
+    #Else
+        Dim full As String = entryPath
+        If String.Left(full, 1) <> "/" Then full = Path.Join(FSPCurrentDirectory(), full)
+        Dim components() As String
+        For Each part As String In String.Split(full, "/")
+            If part = "" Or part = "." Then Continue For
+            If part = ".." Then
+                If Array.Count(components) > 0 Then Array.RemoveAt(components, Array.Count(components) - 1)
+            Else
+                Array.Append(components, part)
+            End If
+        Next
+        Return "/" + String.Join(components, "/")
+    #End If
+End Function

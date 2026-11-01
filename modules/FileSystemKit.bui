@@ -1,0 +1,646 @@
+Import FileSystemPaths
+
+#If TargetWindows Then
+Private Declare Function FSCalloc Lib "msvcrt" Alias "calloc" (count As Integer, size As Integer) As Ptr
+Private Declare Sub FSFree Lib "msvcrt" Alias "free" (memory As Ptr)
+Private Declare Function FSCopy32 Lib "msvcrt" Alias "memcpy" (ByRef value As UInt32, source As Ptr, count As Integer) As Ptr
+Private Declare Function FSCopy16 Lib "msvcrt" Alias "memcpy" (ByRef value As UInt16, source As Ptr, count As Integer) As Ptr
+Private Declare Function FSWide Lib "kernel32" Alias "MultiByteToWideChar" (codepage As UInt32, nativeOptions As UInt32, input As String, length As Int32, output As Ptr, capacity As Int32) As Int32
+Private Declare Function FSUTF8 Lib "kernel32" Alias "WideCharToMultiByte" (codepage As UInt32, nativeOptions As UInt32, input As Ptr, length As Int32, output As Ptr, capacity As Int32, defaultCharacter As Ptr, usedDefault As Ptr) As Int32
+Private Declare Function FSLastError Lib "kernel32" Alias "GetLastError" () As UInt32
+Private Declare Function FSAttributes Lib "kernel32" Alias "GetFileAttributesExW" (entryPath As Ptr, level As Int32, data As Ptr) As Int32
+Private Declare Function FSFindFirst Lib "kernel32" Alias "FindFirstFileW" (entryPath As Ptr, data As Ptr) As Ptr
+Private Declare Function FSFindNext Lib "kernel32" Alias "FindNextFileW" (handle As Ptr, data As Ptr) As Int32
+Private Declare Function FSFindClose Lib "kernel32" Alias "FindClose" (handle As Ptr) As Int32
+Private Declare Function FSOpenReparse Lib "kernel32" Alias "CreateFileW" (entryPath As Ptr, access As UInt32, sharing As UInt32, security As Ptr, disposition As UInt32, nativeOptions As UInt32, templateFile As Ptr) As Ptr
+Private Declare Function FSDeviceControl Lib "kernel32" Alias "DeviceIoControl" (handle As Ptr, code As UInt32, input As Ptr, inputLength As UInt32, output As Ptr, capacity As UInt32, ByRef returned As UInt32, overlapped As Ptr) As Int32
+Private Declare Function FSCloseHandle Lib "kernel32" Alias "CloseHandle" (handle As Ptr) As Int32
+#Else
+Private Declare Function FSCalloc Lib "c" Alias "calloc" (count As Integer, size As Integer) As Ptr
+Private Declare Sub FSFree Lib "c" Alias "free" (memory As Ptr)
+Private Declare Function FSCopy32 Lib "c" Alias "memcpy" (ByRef value As UInt32, source As Ptr, count As Integer) As Ptr
+Private Declare Function FSCopy16 Lib "c" Alias "memcpy" (ByRef value As UInt16, source As Ptr, count As Integer) As Ptr
+Private Declare Function FSCopy64 Lib "c" Alias "memcpy" (ByRef value As Integer, source As Ptr, count As Integer) As Ptr
+Private Declare Function FSWrite32 Lib "c" Alias "memcpy" (destination As Ptr, ByRef value As UInt32, count As Integer) As Ptr
+Private Declare Function FSOpen Lib "c" Alias "open" (entryPath As String, nativeOptions As Int32) As Int32
+Private Declare Function FSClose Lib "c" Alias "close" (descriptor As Int32) As Int32
+Private Declare Function FSCloseDirectory Lib "c" Alias "closedir" (handle As Ptr) As Int32
+Private Declare Function FSReadLink Lib "c" Alias "readlink" (entryPath As String, buffer As Ptr, capacity As Integer) As Integer
+#If TargetMac Then
+Private Declare Function FSErrnoPointer Lib "c" Alias "__error" () As Ptr
+Private Declare Function FSFindSymbol Lib "c" Alias "dlsym" (handle As Ptr, name As String) As Ptr
+Private Delegate Function FSLStatCall(entryPath As String, buffer As Ptr) As Int32
+Private Delegate Function FSFDOpenCall(descriptor As Int32) As Ptr
+Private Delegate Function FSStatAtCall(descriptor As Int32, entryPath As String, buffer As Ptr, nativeOptions As Int32) As Int32
+Private Delegate Function FSReadLinkAtCall(descriptor As Int32, entryPath As String, buffer As Ptr, capacity As Integer) As Integer
+
+Private Function FSLoadSymbol(name As String) As Ptr
+    Dim symbol As Ptr = FSFindSymbol(CType(-2, Ptr), name)
+    If symbol = Nil Then Throw New LibraryUnavailableException("System filesystem symbol is unavailable: " + name)
+    Return symbol
+End Function
+
+Private Function FSLStat(entryPath As String, buffer As Ptr) As Int32
+    Dim name As String = "lstat"
+    #If TargetIntel Then
+        name = "lstat$INODE64"
+    #End If
+    Dim invokeNative As FSLStatCall = CType(FSLoadSymbol(name), FSLStatCall)
+    Return invokeNative(entryPath, buffer)
+End Function
+
+Private Function FSFDOpen(descriptor As Int32) As Ptr
+    Dim name As String = "fdopendir"
+    #If TargetIntel Then
+        name = "fdopendir$INODE64"
+    #End If
+    Dim invokeNative As FSFDOpenCall = CType(FSLoadSymbol(name), FSFDOpenCall)
+    Return invokeNative(descriptor)
+End Function
+
+Private Function FSStatAt(descriptor As Int32, entryPath As String, buffer As Ptr, nativeOptions As Int32) As Int32
+    Dim name As String = "fstatat"
+    #If TargetIntel Then
+        name = "fstatat$INODE64"
+    #End If
+    Dim invokeNative As FSStatAtCall = CType(FSLoadSymbol(name), FSStatAtCall)
+    Return invokeNative(descriptor, entryPath, buffer, nativeOptions)
+End Function
+
+Private Function FSReadLinkAt(descriptor As Int32, entryPath As String, buffer As Ptr, capacity As Integer) As Integer
+    Dim invokeNative As FSReadLinkAtCall = CType(FSLoadSymbol("readlinkat"), FSReadLinkAtCall)
+    Return invokeNative(descriptor, entryPath, buffer, capacity)
+End Function
+#If TargetIntel Then
+Private Declare Function FSReadDirectory Lib "c" Alias "readdir$INODE64" (handle As Ptr) As Ptr
+#Else
+Private Declare Function FSReadDirectory Lib "c" Alias "readdir" (handle As Ptr) As Ptr
+#End If
+#Else
+Private Declare Function FSErrnoPointer Lib "c" Alias "__errno_location" () As Ptr
+Private Optional Declare Function FSReadLinkAt Lib "c" Alias "readlinkat" (descriptor As Int32, entryPath As String, buffer As Ptr, capacity As Integer) As Integer
+Private Optional Declare Function FSLStat Lib "c" Alias "lstat" (entryPath As String, buffer As Ptr) As Int32
+Private Optional Declare Function FSFDOpen Lib "c" Alias "fdopendir" (descriptor As Int32) As Ptr
+Private Declare Function FSReadDirectory Lib "c" Alias "readdir" (handle As Ptr) As Ptr
+Private Optional Declare Function FSStatAt Lib "c" Alias "fstatat" (descriptor As Int32, entryPath As String, buffer As Ptr, nativeOptions As Int32) As Int32
+#End If
+#End If
+
+''' Native error code and operation/entryPath are preserved; failure is never an empty listing.
+Public Class FileInspectionException Inherits Exception
+    Public Sub Constructor(operation As String, entryPath As String, code As Integer)
+        Super.Constructor(operation + " failed for " + entryPath + " (native error " + Str(code) + ")", code)
+    End Sub
+End Class
+
+''' Immutable no-follow metadata. LinkTarget is the stored target, not a resolved entryPath.
+Public Class FileEntry
+    Private Property mPath As String
+    Private Property mKind As String
+    Private Property mSize As Integer
+    Private Property mTarget As String
+    Private Property mTag As Integer
+    Internal Sub Constructor(entryPath As String, kind As String, size As Integer, target As String, tag As Integer = 0)
+        mPath = entryPath
+        mKind = kind
+        mSize = size
+        mTarget = target
+        mTag = tag
+    End Sub
+    Public Property Path As String
+        Get
+            Return mPath
+        End Get
+    End Property
+    Public Property Kind As String
+        Get
+            Return mKind
+        End Get
+    End Property
+    Public Property Size As Integer
+        Get
+            Return mSize
+        End Get
+    End Property
+    Public Property LinkTarget As String
+        Get
+            Return mTarget
+        End Get
+    End Property
+    Public Property ReparseTag As Integer
+        Get
+            Return mTag
+        End Get
+    End Property
+    Public Property IsLink As Boolean
+        Get
+            Return mKind = "symlink" Or mKind = "junction"
+        End Get
+    End Property
+End Class
+
+Private Function FSAt(memory As Ptr, offset As Integer) As Ptr
+    Return CType(CType(memory, Integer) + offset, Ptr)
+End Function
+
+Private Function FSAllocate(size As Integer) As Ptr
+    Dim memory As Ptr = FSCalloc(1, size)
+    If memory = Nil Then Throw New RuntimeException("Unable to allocate filesystem inspection buffer")
+    Return memory
+End Function
+
+Private Function FSRead32(memory As Ptr, offset As Integer) As Integer
+    Dim value As UInt32
+    FSCopy32(value, FSAt(memory, offset), 4)
+    Return value
+End Function
+
+Private Function FSRead16(memory As Ptr, offset As Integer) As Integer
+    Dim value As UInt16
+    FSCopy16(value, FSAt(memory, offset), 2)
+    Return value
+End Function
+
+Private Sub FSValidate(entryPath As String, maxLinkBytes As Integer)
+    If entryPath = "" Then Throw New InvalidArgumentException("entryPath is required")
+    If maxLinkBytes < 1 Or maxLinkBytes > 1048576 Then Throw New InvalidArgumentException("maxLinkBytes must be in 1..1048576")
+    For Each character As String In String.Chars(entryPath)
+        If String.Asc(character) = 0 Then Throw New InvalidArgumentException("entryPath contains NUL")
+    Next
+End Sub
+
+Private Function FSWithoutTrailingSeparators(entryPath As String) As String
+    Dim minimum As Integer = 1
+    #If TargetWindows Then
+        If String.Len(entryPath) >= 3 Then
+            If String.Mid(entryPath, 2, 1) = ":" Then minimum = 3
+        End If
+        Dim normalized As String = String.Replace(entryPath, "/", "\\")
+        Dim start As Integer = 3
+        If String.StartsWith(normalized, "\\\\?\\", True) Or String.StartsWith(normalized, "\\\\.\\", True) Then
+            If String.Mid(normalized, 6, 1) = ":" Then
+                minimum = 7
+            ElseIf String.StartsWith(String.UCase(normalized), "\\\\?\\UNC\\", True) Then
+                start = 9
+            End If
+        End If
+        If String.StartsWith(normalized, "\\\\", True) And minimum = 1 Then
+            Dim separators As Integer = 0
+            For i As Integer = start To String.Len(normalized)
+                If String.Mid(normalized, i, 1) = "\\" Then
+                    separators += 1
+                    If separators = 2 Then
+                        minimum = i
+                        Exit For
+                    End If
+                End If
+            Next
+        End If
+    #End If
+    While String.Len(entryPath) > minimum
+        Dim tail As String = String.Right(entryPath, 1)
+        #If TargetWindows Then
+            If tail <> "/" And tail <> "\\" Then Exit While
+        #Else
+            If tail <> "/" Then Exit While
+        #End If
+        entryPath = String.Left(entryPath, String.Len(entryPath) - 1)
+    End While
+    Return entryPath
+End Function
+
+#If TargetWindows Then
+Private Function FSMakeWide(input As String) As Ptr
+    Dim count As Integer = FSWide(65001, 8, input, -1, Nil, 0)
+    If count = 0 Then Throw New FileInspectionException("UTF-16 conversion", input, FSLastError())
+    Dim memory As Ptr = FSAllocate(count * 2)
+    If FSWide(65001, 8, input, -1, memory, count) = 0 Then
+        Dim code As Integer = FSLastError()
+        FSFree(memory)
+        Throw New FileInspectionException("UTF-16 conversion", input, code)
+    End If
+    Return memory
+End Function
+
+Private Function FSCopyWide(input As Ptr, units As Integer) As String
+    If units = 0 Then Return ""
+    Dim length As Integer = FSUTF8(65001, 128, input, units, Nil, 0, Nil, Nil)
+    If length = 0 Then Throw New FileInspectionException("UTF-8 conversion", "native filename", FSLastError())
+    Dim memory As Ptr = FSAllocate(length + 1)
+    Try
+        If FSUTF8(65001, 128, input, units, memory, length, Nil, Nil) = 0 Then Throw New FileInspectionException("UTF-8 conversion", "native filename", FSLastError())
+        Return CType(CType(memory, CString), String)
+    Finally
+        FSFree(memory)
+    End Try
+End Function
+
+Private Function FSOpenListingRoot(entryPath As String) As Ptr
+    Dim widePath As Ptr = FSMakeWide(entryPath)
+    Try
+        ' FILE_LIST_DIRECTORY checks ACLs even when FindFirstFile reports no entries.
+        Dim handle As Ptr = FSOpenReparse(widePath, 1, 7, Nil, 3, 35651584, Nil)
+        If handle = CType(-1, Ptr) Then Throw New FileInspectionException("open directory for listing", entryPath, FSLastError())
+        Return handle
+    Finally
+        FSFree(widePath)
+    End Try
+End Function
+
+Private Function FSWindowsEntry(entryPath As String, metadata As Ptr, maxLinkBytes As Integer) As FileEntry
+    Dim attributes As Integer = FSRead32(metadata, 0)
+    Dim kind As String = "file"
+    If (attributes And 16) <> 0 Then kind = "directory"
+    Dim size As Integer = FSRead32(metadata, 28) * 4294967296 + FSRead32(metadata, 32)
+    Dim target As String = ""
+    Dim tag As Integer = 0
+    If (attributes And 1024) <> 0 Then
+        kind = "reparse"
+        Dim widePath As Ptr = FSMakeWide(entryPath)
+        Try
+            Dim handle As Ptr = FSOpenReparse(widePath, 0, 7, Nil, 3, 35651584, Nil)
+            If handle = CType(-1, Ptr) Then Throw New FileInspectionException("open reparse point", entryPath, FSLastError())
+            Try
+                Dim buffer As Ptr = FSAllocate(16384)
+                Try
+                    Dim returned As UInt32
+                    If FSDeviceControl(handle, 589992, Nil, 0, buffer, 16384, returned, Nil) = 0 Then Throw New FileInspectionException("read reparse point", entryPath, FSLastError())
+                    If returned < 8 Then Throw New FileInspectionException("read reparse point", entryPath, 13)
+                    tag = FSRead32(buffer, 0)
+                    Dim base As Integer = 0
+                    If tag = 2684354572 Then
+                        kind = "symlink"
+                        base = 20
+                    ElseIf tag = 2684354563 Then
+                        kind = "junction"
+                        base = 16
+                    End If
+                    If base <> 0 Then
+                        If returned < base Then Throw New FileInspectionException("read reparse point", entryPath, 13)
+                        Dim offset As Integer = FSRead16(buffer, 12)
+                        Dim length As Integer = FSRead16(buffer, 14)
+                        If length = 0 Then
+                            offset = FSRead16(buffer, 8)
+                            length = FSRead16(buffer, 10)
+                        End If
+                        If offset Mod 2 <> 0 Or length Mod 2 <> 0 Or base + offset + length > returned Then Throw New FileInspectionException("read reparse point", entryPath, 13)
+                        target = FSCopyWide(FSAt(buffer, base + offset), length \ 2)
+                        If Bytes.FromString(target, Text.Encodings.UTF8).Count > maxLinkBytes Then Throw New InvalidArgumentException("Link target exceeds maxLinkBytes")
+                    End If
+                Finally
+                    FSFree(buffer)
+                End Try
+            Finally
+                FSCloseHandle(handle)
+            End Try
+        Finally
+            FSFree(widePath)
+        End Try
+    End If
+    Return New FileEntry(entryPath, kind, size, target, tag)
+End Function
+#Else
+Private Function FSErrno() As Integer
+    Return FSRead32(FSErrnoPointer(), 0)
+End Function
+
+Private Function FSPosixEntry(entryPath As String, metadata As Ptr, maxLinkBytes As Integer, descriptor As Integer, childName As String) As FileEntry
+    Dim mode As Integer
+    Dim sizeOffset As Integer = 48
+    #If TargetMac Then
+        mode = FSRead16(metadata, 4)
+        sizeOffset = 96
+    #ElseIf TargetArm Then
+        mode = FSRead32(metadata, 16)
+    #Else
+        mode = FSRead32(metadata, 24)
+    #End If
+    Dim kind As String = "other"
+    Select Case mode And 61440
+        Case 32768
+            kind = "file"
+        Case 16384
+            kind = "directory"
+        Case 40960
+            kind = "symlink"
+    End Select
+    Dim size As Integer
+    FSCopy64(size, FSAt(metadata, sizeOffset), 8)
+    Dim target As String = ""
+    If kind = "symlink" Then
+        Dim buffer As Ptr = FSAllocate(maxLinkBytes + 2)
+        Try
+            Dim length As Integer
+            If descriptor < 0 Then
+                length = FSReadLink(entryPath, buffer, maxLinkBytes + 1)
+            Else
+                length = FSReadLinkAt(descriptor, childName, buffer, maxLinkBytes + 1)
+            End If
+            If length < 0 Then Throw New FileInspectionException("readlink", entryPath, FSErrno())
+            If length > maxLinkBytes Then Throw New InvalidArgumentException("Link target exceeds maxLinkBytes")
+            target = CType(CType(buffer, CString), String)
+        Finally
+            FSFree(buffer)
+        End Try
+    End If
+    Return New FileEntry(entryPath, kind, size, target)
+End Function
+#End If
+
+''' Inspect the final entryPath component itself, including broken symbolic links.
+Public Function InspectFileEntry(entryPath As String, maxLinkBytes As Integer = 65536) As FileEntry
+    FSValidate(entryPath, maxLinkBytes)
+    entryPath = FSWithoutTrailingSeparators(entryPath)
+    Dim metadata As Ptr = FSAllocate(512)
+    Try
+        #If TargetWindows Then
+            Dim widePath As Ptr = FSMakeWide(entryPath)
+            Try
+                If FSAttributes(widePath, 0, metadata) = 0 Then Throw New FileInspectionException("file attributes", entryPath, FSLastError())
+            Finally
+                FSFree(widePath)
+            End Try
+            Return FSWindowsEntry(entryPath, metadata, maxLinkBytes)
+        #Else
+            If FSLStat(entryPath, metadata) <> 0 Then Throw New FileInspectionException("lstat", entryPath, FSErrno())
+            Return FSPosixEntry(entryPath, metadata, maxLinkBytes, -1, "")
+        #End If
+    Finally
+        FSFree(metadata)
+    End Try
+End Function
+
+''' Nonrecursive listing; reject a linked root, preserve child links and report failures.
+Public Function ReadDirectoryEntries(entryPath As String, maxEntries As Integer = 100000, maxLinkBytes As Integer = 65536) As Array Of FileEntry
+    FSValidate(entryPath, maxLinkBytes)
+    entryPath = FSWithoutTrailingSeparators(entryPath)
+    If maxEntries < 0 Then Throw New InvalidArgumentException("maxEntries must be nonnegative")
+    Dim entries() As FileEntry
+    #If TargetWindows Then
+        Dim root As FileEntry = InspectFileEntry(entryPath, maxLinkBytes)
+        If root.Kind <> "directory" Then Throw New InvalidArgumentException("Directory root must be a real directory, not a link or reparse point")
+        Dim rootHandle As Ptr = FSOpenListingRoot(entryPath)
+        Dim pattern As Ptr = Nil
+        Dim metadata As Ptr = Nil
+        Try
+            pattern = FSMakeWide(Path.Join(entryPath, "*"))
+            metadata = FSAllocate(592)
+            Dim handle As Ptr = FSFindFirst(pattern, metadata)
+            If handle = CType(-1, Ptr) Then
+                Dim code As Integer = FSLastError()
+                Throw New FileInspectionException("directory enumeration", entryPath, code)
+            End If
+            Try
+                Do
+                    Dim units As Integer = 0
+                    While units < 260
+                        If FSRead16(metadata, 44 + units * 2) = 0 Then Exit While
+                        units += 1
+                    End While
+                    Dim name As String = FSCopyWide(FSAt(metadata, 44), units)
+                    If name <> "." And name <> ".." Then
+                        If Array.Count(entries) >= maxEntries Then Throw New InvalidArgumentException("Directory exceeds maxEntries")
+                        Array.Append(entries, FSWindowsEntry(Path.Join(entryPath, name), metadata, maxLinkBytes))
+                    End If
+                    If FSFindNext(handle, metadata) = 0 Then
+                        Dim code As Integer = FSLastError()
+                        If code <> 18 Then Throw New FileInspectionException("directory enumeration", entryPath, code)
+                        Exit Do
+                    End If
+                Loop
+            Finally
+                FSFindClose(handle)
+            End Try
+        Finally
+            If pattern <> Nil Then FSFree(pattern)
+            If metadata <> Nil Then FSFree(metadata)
+            FSCloseHandle(rootHandle)
+        End Try
+    #Else
+        Dim nativeOptions As Int32
+        Dim noFollow As Int32
+        #If TargetMac Then
+            nativeOptions = 16777216 + 1048576 + 256
+            noFollow = 32
+        #ElseIf TargetArm Then
+            ' Linux ARM64 uses different O_DIRECTORY/O_NOFOLLOW bits from x86_64.
+            nativeOptions = 524288 + 16384 + 32768
+            noFollow = 256
+        #Else
+            nativeOptions = 524288 + 65536 + 131072
+            noFollow = 256
+        #End If
+        Dim descriptor As Int32 = FSOpen(entryPath, nativeOptions)
+        If descriptor < 0 Then Throw New FileInspectionException("open directory without following root link", entryPath, FSErrno())
+        Dim handle As Ptr = Nil
+        Try
+            handle = FSFDOpen(descriptor)
+        Catch error As Exception
+            FSClose(descriptor)
+            Throw error
+        End Try
+        If handle = Nil Then
+            Dim code As Integer = FSErrno()
+            FSClose(descriptor)
+            Throw New FileInspectionException("fdopendir", entryPath, code)
+        End If
+        Dim metadata As Ptr = Nil
+        Try
+            metadata = FSAllocate(512)
+            Do
+                Dim clearError As UInt32 = 0
+                FSWrite32(FSErrnoPointer(), clearError, 4)
+                Dim record As Ptr = FSReadDirectory(handle)
+                If record = Nil Then
+                    Dim code As Integer = FSErrno()
+                    If code <> 0 Then Throw New FileInspectionException("readdir", entryPath, code)
+                    Exit Do
+                End If
+                Dim nameOffset As Integer = 19
+                #If TargetMac Then
+                    nameOffset = 21
+                #End If
+                Dim name As String = CType(CType(FSAt(record, nameOffset), CString), String)
+                If name = "." Or name = ".." Then Continue Do
+                If Array.Count(entries) >= maxEntries Then Throw New InvalidArgumentException("Directory exceeds maxEntries")
+                Dim childPath As String = Path.Join(entryPath, name)
+                If FSStatAt(descriptor, name, metadata, noFollow) <> 0 Then Throw New FileInspectionException("fstatat", childPath, FSErrno())
+                Array.Append(entries, FSPosixEntry(childPath, metadata, maxLinkBytes, descriptor, name))
+            Loop
+        Finally
+            If metadata <> Nil Then FSFree(metadata)
+            FSCloseDirectory(handle)
+        End Try
+    #End If
+    Return entries
+End Function
+
+' Timestamp updates use seconds and nanoseconds directly, never floating-point conversion.
+#If TargetWindows Then
+Private Declare Function FSSetTime Lib "kernel32" Alias "SetFileTime" (handle As Ptr, creation As Ptr, accessTime As Ptr, modificationTime As Ptr) As Int32
+Private Declare Function FSWrite64Time Lib "msvcrt" Alias "memcpy" (destination As Ptr, ByRef value As Integer, count As Integer) As Ptr
+#Else
+Private Declare Function FSWrite64Time Lib "c" Alias "memcpy" (destination As Ptr, ByRef value As Integer, count As Integer) As Ptr
+#If TargetMac Then
+Private Delegate Function FSUpdateTimesCall(descriptor As Int32, entryPath As String, times As Ptr, nativeOptions As Int32) As Int32
+Private Function FSUpdateTimes(descriptor As Int32, entryPath As String, times As Ptr, nativeOptions As Int32) As Int32
+    Dim invokeNative As FSUpdateTimesCall = CType(FSLoadSymbol("utimensat"), FSUpdateTimesCall)
+    Return invokeNative(descriptor, entryPath, times, nativeOptions)
+End Function
+#Else
+Private Optional Declare Function FSUpdateTimes Lib "c" Alias "utimensat" (descriptor As Int32, entryPath As String, times As Ptr, nativeOptions As Int32) As Int32
+#End If
+#End If
+
+''' Exact UTC instant; seconds are floor seconds since 1970, nanoseconds in 0..999999999.
+Public Class FileTimestamp
+    Private Property mSeconds As Integer
+    Private Property mNanoseconds As Integer
+    Public Sub Constructor(unixSeconds As Integer, nanoseconds As Integer = 0)
+        If unixSeconds < -62135596800 Or unixSeconds > 253402300799 Then Throw New InvalidArgumentException("FileTimestamp seconds must be within UTC years 1..9999")
+        If nanoseconds < 0 Or nanoseconds > 999999999 Then Throw New InvalidArgumentException("FileTimestamp nanoseconds must be in 0..999999999")
+        mSeconds = unixSeconds
+        mNanoseconds = nanoseconds
+    End Sub
+    Public Property UnixSeconds As Integer
+        Get
+            Return mSeconds
+        End Get
+    End Property
+    Public Property Nanoseconds As Integer
+        Get
+            Return mNanoseconds
+        End Get
+    End Property
+    ''' DateTime stores milliseconds; negative timestamps use floor division.
+    Public Shared Function FromDateTime(instant As DateTime) As FileTimestamp
+        If instant = Nil Then Throw New InvalidArgumentException("instant is required")
+        Dim seconds As Integer = instant.MillisFrom1970 \ 1000
+        Dim remainder As Integer = instant.MillisFrom1970 Mod 1000
+        If remainder < 0 Then
+            seconds -= 1
+            remainder += 1000
+        End If
+        Return New FileTimestamp(seconds, remainder * 1000000)
+    End Function
+End Class
+
+''' Native update failure; ErrorCode preserves errno or GetLastError.
+Public Class FileUpdateException Inherits Exception
+    Public Sub Constructor(operation As String, entryPath As String, code As Integer)
+        Super.Constructor(operation + " failed for " + entryPath + " (native error " + Str(code) + ")", code)
+    End Sub
+End Class
+
+Private Sub FSStoreTime(memory As Ptr, offset As Integer, value As Integer)
+    FSWrite64Time(FSAt(memory, offset), value, 8)
+End Sub
+
+#If TargetWindows Then
+Private Function FSWindowsTimestamp(instant As FileTimestamp) As Ptr
+    If instant = Nil Then Return Nil
+    If instant.UnixSeconds < -11644473600 Then Throw New InvalidArgumentException("Windows file timestamps require UTC year 1601 or later")
+    If instant.Nanoseconds Mod 100 <> 0 Then Throw New InvalidArgumentException("Windows file timestamps require 100-nanosecond precision")
+    Dim ticks As Integer = (instant.UnixSeconds + 11644473600) * 10000000 + instant.Nanoseconds \ 100
+    If ticks = 0 Then Throw New InvalidArgumentException("Windows FILETIME zero preserves the field; select an instant after 1601-01-01T00:00:00Z")
+    Dim memory As Ptr = FSAllocate(8)
+    FSStoreTime(memory, 0, ticks)
+    Return memory
+End Function
+
+Private Sub FSSetWindowsTimes(entryPath As String, creationTime As FileTimestamp, accessTime As FileTimestamp, modificationTime As FileTimestamp, followFinalLink As Boolean)
+    Dim creation As Ptr = Nil
+    Dim access As Ptr = Nil
+    Dim modification As Ptr = Nil
+    Dim widePath As Ptr = Nil
+    Try
+        creation = FSWindowsTimestamp(creationTime)
+        access = FSWindowsTimestamp(accessTime)
+        modification = FSWindowsTimestamp(modificationTime)
+        widePath = FSMakeWide(entryPath)
+        Dim nativeOptions As UInt32 = 33554432
+        If Not followFinalLink Then nativeOptions = nativeOptions Or 2097152
+        ' FILE_WRITE_ATTRIBUTES, all sharing, OPEN_EXISTING, directory/link support.
+        Dim handle As Ptr = FSOpenReparse(widePath, 256, 7, Nil, 3, nativeOptions, Nil)
+        If handle = CType(-1, Ptr) Then Throw New FileUpdateException("open for timestamp update", entryPath, FSLastError())
+        Try
+            If FSSetTime(handle, creation, access, modification) = 0 Then Throw New FileUpdateException("SetFileTime", entryPath, FSLastError())
+        Finally
+            FSCloseHandle(handle)
+        End Try
+    Finally
+        If widePath <> Nil Then FSFree(widePath)
+        If creation <> Nil Then FSFree(creation)
+        If access <> Nil Then FSFree(access)
+        If modification <> Nil Then FSFree(modification)
+    End Try
+End Sub
+#End If
+
+''' Update either/both timestamps; Nil preserves the existing field. Default updates the final link itself.
+Public Sub SetFileTimes(entryPath As String, accessTime As FileTimestamp, modificationTime As FileTimestamp, followFinalLink As Boolean = False)
+    FSValidate(entryPath, 65536)
+    entryPath = FSWithoutTrailingSeparators(entryPath)
+    If accessTime = Nil And modificationTime = Nil Then Throw New InvalidArgumentException("At least one timestamp is required")
+    #If TargetWindows Then
+        FSSetWindowsTimes(entryPath, Nil, accessTime, modificationTime, followFinalLink)
+    #Else
+        Dim omit As Integer = 1073741822
+        Dim currentDirectory As Int32 = -100
+        Dim nativeOptions As Int32 = 0
+        #If TargetMac Then
+            omit = -2
+            currentDirectory = -2
+            If Not followFinalLink Then nativeOptions = 32
+        #Else
+            If Not followFinalLink Then nativeOptions = 256
+        #End If
+        Dim times As Ptr = FSAllocate(32)
+        Try
+            FSStoreTime(times, 8, omit)
+            FSStoreTime(times, 24, omit)
+            If accessTime <> Nil Then
+                FSStoreTime(times, 0, accessTime.UnixSeconds)
+                FSStoreTime(times, 8, accessTime.Nanoseconds)
+            End If
+            If modificationTime <> Nil Then
+                FSStoreTime(times, 16, modificationTime.UnixSeconds)
+                FSStoreTime(times, 24, modificationTime.Nanoseconds)
+            End If
+            If FSUpdateTimes(currentDirectory, entryPath, times, nativeOptions) <> 0 Then Throw New FileUpdateException("utimensat", entryPath, FSErrno())
+        Finally
+            FSFree(times)
+        End Try
+    #End If
+End Sub
+
+''' Windows-only creation-time update. Other targets explicitly reject without touching the path.
+Public Sub SetFileCreationTime(entryPath As String, creationTime As FileTimestamp, followFinalLink As Boolean = False)
+    FSValidate(entryPath, 65536)
+    entryPath = FSWithoutTrailingSeparators(entryPath)
+    If creationTime = Nil Then Throw New InvalidArgumentException("creationTime is required")
+    #If TargetWindows Then
+        FSSetWindowsTimes(entryPath, creationTime, Nil, Nil, followFinalLink)
+    #Else
+        Throw New UnsupportedOperationException("Creation-time updates are supported only on Windows")
+    #End If
+End Sub
+
+
+''' Resolve links in an existing path. Failure preserves the native error code.
+Public Function CanonicalPath(entryPath As String) As String
+    Try
+        Return FSPCanonicalPath(entryPath)
+    Catch error As FSPNativePathException
+        Throw New FileInspectionException(error.Message, entryPath, error.ErrorCode)
+    End Try
+End Function
+
+''' Make a lexical absolute path without checking existence or resolving links.
+Public Function AbsolutePath(entryPath As String) As String
+    Try
+        Return FSPAbsolutePath(entryPath)
+    Catch error As FSPNativePathException
+        Throw New FileInspectionException(error.Message, entryPath, error.ErrorCode)
+    End Try
+End Function
