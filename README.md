@@ -1,4 +1,4 @@
-# Inspect filesystem entries and update timestamps explicitly
+# Filesystem entry snapshots and explicit timestamp updates
 
 Link-aware filesystem inspection on macOS, Windows and Linux. Copy
 `packages/filesystemkit-0.1.0.buipkg` into a consumer's packages directory, then

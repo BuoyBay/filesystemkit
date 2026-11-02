@@ -1,1 +1,1 @@
-{"schema":1,"name":"filesystemkit","version":"0.1.0","description":"Inspect filesystem entries and update timestamps explicitly"}
+{"schema":1,"name":"filesystemkit","version":"0.1.0","description":"Filesystem entry snapshots and explicit timestamp updates"}
