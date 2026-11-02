@@ -1,1 +1,1 @@
-{"schema":1,"name":"filesystemkit","version":"0.1.0","description":"Link-aware nonrecursive filesystem snapshots and exact explicit timestamp updates with native errors"}
+{"schema":1,"name":"filesystemkit","version":"0.1.0","description":"Inspect filesystem entries and update timestamps explicitly"}
