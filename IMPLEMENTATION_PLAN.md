@@ -25,10 +25,3 @@ Risks: filesystem precision/range may truncate/clamp even successful native
 calls; operating-system access policies vary; intermediate symlinks are still
 resolved and this is not a sandbox or an atomic path-identity guarantee.
 macOS/Windows are compiler-checked, not claimed runtime-verified in this pass.
-
-Validation: compiler JSON for source and sealed consumer on all six desktop
-targets; native ABI static assertions; Linux execution compared against Python
-stat/lstat for exact nanoseconds, pre-epoch instants, individual-field
-preservation, real directories, non-follow/follow/broken links, trailing slash,
-missing/invalid paths, argument bounds and DateTime timezone independence.
-Run the existing inspection suite to establish backward compatibility.

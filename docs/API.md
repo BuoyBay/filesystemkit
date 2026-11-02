@@ -53,29 +53,12 @@ and reads reparse data with OPEN_REPARSE_POINT handles. Concurrent replacements 
 race those path lookups. Long Windows paths require native extended path syntax
 or an app configured for OS long-path policy.
 
-## Build and verify
+## Native ABI requirements
 
-```sh
-/usr/bin/buoy pkg seal . -o packages/filesystemkit-0.1.0.buipkg
-```
-
-The verifier checks six targets, compiles a host C-header ABI check and executes
-a fresh sealed consumer. Linux tests compare Python lstat/readlink for Unicode
-names, regular files, directories, FIFOs and relative/absolute/broken/looping links.
-They cover linked roots with trailing separators, budgets, missing paths,
-permission errors and descriptor cleanup after repeated successful/failing calls.
-Windows fixture creation requires symlink privilege. The inspection APIs (before
-timestamp updates) also pass native execution on macOS ARM64 and real Windows 11 x86_64
-lab, including junction/reparse/ACL and handle cleanup tests. Reproduce with
-`tests/standard_library_macos.py` and `tests/standard_library_windows.py`. Optional --link-target requires a
-complete SDK/runtime. BUOY, BPM_PACKAGER and CC select toolchain commands.
-
-Linux uses optional libc bindings where Buoy's stubs omit symbols; macOS uses
-typed dynamic bindings and the documented 64-bit-inode symbols for the same
-limitation. The six supported targets are 64-bit desktop ABIs; field offsets and
-buffer assumptions are checked against headers by tests/filesystemkit_abi.c.
-Independent implementation; no declaresub code is copied.
-
+Linux uses optional libc bindings where Buoy's stubs omit symbols. macOS uses
+typed dynamic bindings and the SDK-selected 64-bit-inode symbols. The supported
+desktop ABIs are 64-bit; native field layouts must match the target headers.
+The implementation is independent and contains no copied declaresub code.
 
 ## Explicit timestamp updates
 
@@ -117,8 +100,6 @@ updates until handles are closed, and filesystem-specific UTC/local storage
 rules still apply. No API is provided here for ctime (metadata-change time),
 POSIX creation time, immutable/BSD flags, or a portable Locked property.
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
 Native contracts: [POSIX utimensat](https://pubs.opengroup.org/onlinepubs/9799919799/functions/futimens.html),
 [Windows SetFileTime](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfiletime).
 
@@ -149,19 +130,10 @@ and filesystem restrictions still apply. Neither function guarantees stable
 identity across concurrent renames, is a sandbox boundary, or has a deadline.
 
 Empty input and observable NUL characters reject before a native path call.
-**BUI-003:** Buoy 0.72 can discard embedded NUL before a String reaches this API;
+**String input limitation:** Buoy 0.72 can discard embedded NUL before a String reaches this API;
 these functions cannot detect an already truncated value. Validate untrusted raw
 bytes before constructing a String. The parameter is named `entryPath` because
 `path` is reserved by the installed compiler. Existing `InspectFileEntry` and
 `LinkTarget` remain the no-follow/stored-target APIs.
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
-Observed on the tested Windows x64 VM: lexical expansion of an extended path
-containing `target\..\target` removed `..`, while canonical resolution of that
-same unmodified extended input failed with native error 123. A clean extended
-path succeeded and kept its prefix. Missing targets returned 2 or 3 and a link
-loop returned 1921. These are recorded native outcomes, not portable error-number
-promises. UNC coverage is lexical-only; no network share was contacted.
-
-Review notes: BUI-003 can silently drop a NUL as well as truncate at it, potentially producing a different path; validation cannot recover text already lost by the runtime. The macOS helper now binds the SDK-selected `realpath$DARWIN_EXTSN` symbol explicitly and fails if it is unavailable, avoiding an unverified legacy-symbol fallback. This does not establish native macOS behavior: existing-leaf, dangling-link, loop and NULL-buffer cases still require a Mac. Windows reference comparisons exercise the same Win32 APIs and establish marshalling/lifecycle rather than an independent filesystem oracle.
+Buoy 0.72 can truncate or silently drop NUL characters before a String reaches the API; validate untrusted raw bytes before constructing Strings. macOS uses the SDK-selected `realpath$DARWIN_EXTSN` symbol and fails if it is unavailable. Windows extended-path lexical expansion and canonical resolution follow different native rules; do not assume identical behavior or portable native error numbers.

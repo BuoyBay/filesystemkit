@@ -52,8 +52,6 @@ Immutable no-follow metadata. LinkTarget is the stored target, not a resolved en
 | `ReparseTag` | `Integer` | Yes | No | — | — |
 | `IsLink` | `Boolean` | Yes | No | — | — |
 
-## FileSystemKit functions
-
 ### InspectFileEntry
 
 `Public Function InspectFileEntry(entryPath As String, maxLinkBytes As Integer = 65536) As FileEntry`
@@ -243,8 +241,6 @@ Returns: no value.
 | `code` | `Integer` | `ByVal` | Required |
 
 Returns: no value.
-
-## FileSystemPaths functions
 
 ### FSPCanonicalPath
 

@@ -63,29 +63,12 @@ and reads reparse data with OPEN_REPARSE_POINT handles. Concurrent replacements 
 race those path lookups. Long Windows paths require native extended path syntax
 or an app configured for OS long-path policy.
 
-## Build and verify
+## Native ABI requirements
 
-```sh
-/usr/bin/buoy pkg seal . -o packages/filesystemkit-0.1.0.buipkg
-```
-
-The verifier checks six targets, compiles a host C-header ABI check and executes
-a fresh sealed consumer. Linux tests compare Python lstat/readlink for Unicode
-names, regular files, directories, FIFOs and relative/absolute/broken/looping links.
-They cover linked roots with trailing separators, budgets, missing paths,
-permission errors and descriptor cleanup after repeated successful/failing calls.
-Windows fixture creation requires symlink privilege. The inspection APIs (before
-timestamp updates) also pass native execution on macOS ARM64 and real Windows 11 x86_64
-lab, including junction/reparse/ACL and handle cleanup tests. Reproduce with
-`tests/standard_library_macos.py` and `tests/standard_library_windows.py`. Optional --link-target requires a
-complete SDK/runtime. BUOY, BPM_PACKAGER and CC select toolchain commands.
-
-Linux uses optional libc bindings where Buoy's stubs omit symbols; macOS uses
-typed dynamic bindings and the documented 64-bit-inode symbols for the same
-limitation. The six supported targets are 64-bit desktop ABIs; field offsets and
-buffer assumptions are checked against headers by tests/filesystemkit_abi.c.
-Independent implementation; no declaresub code is copied.
-
+Linux uses optional libc bindings where Buoy's stubs omit symbols. macOS uses
+typed dynamic bindings and the SDK-selected 64-bit-inode symbols. The supported
+desktop ABIs are 64-bit; native field layouts must match the target headers.
+The implementation is independent and contains no copied declaresub code.
 
 ## Explicit timestamp updates
 
@@ -127,14 +110,10 @@ updates until handles are closed, and filesystem-specific UTC/local storage
 rules still apply. No API is provided here for ctime (metadata-change time),
 POSIX creation time, immutable/BSD flags, or a portable Locked property.
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
 Native contracts: POSIX utimensat,
 Windows SetFileTime.
 
-
 [Typed API](typed-api.md) · [Getting started](getting-started.md)
-
 
 ## Absolute and resolved paths
 
@@ -148,9 +127,6 @@ Both calls accept relative paths against the process working directory. Windows
 canonical results may use extended-length paths such as `\\?\` paths. These APIs
 are snapshots, not a sandbox or an atomic guarantee against path replacement.
 Buoy 0.72 can truncate or silently drop embedded NUL before these calls receive
-the String (BUI-003); the library cannot recover the original input.
+the String; the library cannot recover the original input.
 
-Linux x64 and Windows x64 sealed consumers passed repeated native fixtures.
-macOS is compiler-checked only; its SDK-selected `realpath$DARWIN_EXTSN` binding
-still requires native missing-path, dangling-link, loop and allocation tests.
-ARM64 execution, Windows denied ACLs and canonical UNC shares remain unverified.
+Canonical resolution uses the native platform API. Validate target-specific path forms, permissions and network shares for the deployment environment.
